@@ -10,7 +10,13 @@
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
+#include <stdbool.h>
 #include "argparse.h"
+
+#if !defined(ARGPARSE_FPRINTF)
+    #define ARGPARSE_FPRINTF(file, format, ...) fprintf(file, format, __VA_ARGS__)
+    #define ARGPARSE_FPRINTF_S(file, string)    fprintf(file, string)
+#endif
 
 #define OPT_UNSET 1
 #define OPT_LONG  (1 << 1)
@@ -39,16 +45,15 @@ argparse_error(struct argparse *self, const struct argparse_option *opt,
 {
     (void)self;
     if (flags & OPT_LONG) {
-        fprintf(stderr, "error: option `--%s` %s\n", opt->long_name, reason);
+        ARGPARSE_FPRINTF(stderr, "error: option `--%s` %s\n", opt->long_name, reason);
     } else {
-        fprintf(stderr, "error: option `-%c` %s\n", opt->short_name, reason);
+        ARGPARSE_FPRINTF(stderr, "error: option `-%c` %s\n", opt->short_name, reason);
     }
-    exit(1);
 }
 
-static int
+static bool
 argparse_getvalue(struct argparse *self, const struct argparse_option *opt,
-                  int flags)
+                  int flags, int* value)
 {
     const char *s = NULL;
     if (!opt->value)
@@ -80,6 +85,7 @@ argparse_getvalue(struct argparse *self, const struct argparse_option *opt,
             *(const char **)opt->value = *++self->argv;
         } else {
             argparse_error(self, opt, "requires a value", flags);
+            return false;
         }
         break;
     case ARGPARSE_OPT_INTEGER:
@@ -92,11 +98,16 @@ argparse_getvalue(struct argparse *self, const struct argparse_option *opt,
             *(int *)opt->value = strtol(*++self->argv, (char **)&s, 0);
         } else {
             argparse_error(self, opt, "requires a value", flags);
+            return false;
         }
-        if (errno)
+        if (errno) {
             argparse_error(self, opt, strerror(errno), flags);
-        if (s[0] != '\0')
+            return false;
+        }
+        if (s[0] != '\0') {
             argparse_error(self, opt, "expects an integer value", flags);
+            return false;
+        }
         break;
     case ARGPARSE_OPT_FLOAT:
         errno = 0;
@@ -108,11 +119,16 @@ argparse_getvalue(struct argparse *self, const struct argparse_option *opt,
             *(float *)opt->value = strtof(*++self->argv, (char **)&s);
         } else {
             argparse_error(self, opt, "requires a value", flags);
+            return false;
         }
-        if (errno)
+        if (errno) {
             argparse_error(self, opt, strerror(errno), flags);
-        if (s[0] != '\0')
+            return false;
+        }
+        if (s[0] != '\0') {
             argparse_error(self, opt, "expects a numerical value", flags);
+            return false;
+        }
         break;
     default:
         assert(0);
@@ -120,10 +136,12 @@ argparse_getvalue(struct argparse *self, const struct argparse_option *opt,
 
 skipped:
     if (opt->callback) {
-        return opt->callback(self, opt);
+        *value = opt->callback(self, opt);
+        return true;
     }
 
-    return 0;
+    *value = 0;
+    return true;
 }
 
 static void
@@ -140,7 +158,7 @@ argparse_options_check(const struct argparse_option *options)
         case ARGPARSE_OPT_GROUP:
             continue;
         default:
-            fprintf(stderr, "wrong option type: %d", options->type);
+            ARGPARSE_FPRINTF(stderr, "wrong option type: %d", options->type);
             break;
         }
     }
@@ -152,7 +170,13 @@ argparse_short_opt(struct argparse *self, const struct argparse_option *options)
     for (; options->type != ARGPARSE_OPT_END; options++) {
         if (options->short_name == *self->optvalue) {
             self->optvalue = self->optvalue[1] ? self->optvalue + 1 : NULL;
-            return argparse_getvalue(self, options, 0);
+            int value;
+            if (argparse_getvalue(self, options, 0, &value)) {
+                return value;
+            } else {
+                /* Error occured. */
+                return -1;
+            }
         }
     }
     return -2;
@@ -192,7 +216,13 @@ argparse_long_opt(struct argparse *self, const struct argparse_option *options)
                 continue;
             self->optvalue = rest + 1;
         }
-        return argparse_getvalue(self, options, opt_flags | OPT_LONG);
+        int value;
+        if (argparse_getvalue(self, options, opt_flags | OPT_LONG, &value)) {
+            return value;
+        } else {
+            /* Error occured. */
+            return -1;
+        }
     }
     return -2;
 }
@@ -272,9 +302,9 @@ argparse_parse(struct argparse *self, int argc, const char **argv)
         continue;
 
 unknown:
-        fprintf(stderr, "error: unknown option `%s`\n", self->argv[0]);
+        ARGPARSE_FPRINTF(stderr, "error: unknown option `%s`\n", self->argv[0]);
         argparse_usage(self);
-        exit(1);
+        return -1;
     }
 
 end:
@@ -289,18 +319,18 @@ void
 argparse_usage(struct argparse *self)
 {
     if (self->usages) {
-        fprintf(stdout, "Usage: %s\n", *self->usages++);
+        ARGPARSE_FPRINTF(stdout, "Usage: %s\n", *self->usages++);
         while (*self->usages && **self->usages)
-            fprintf(stdout, "   or: %s\n", *self->usages++);
+            ARGPARSE_FPRINTF(stdout, "   or: %s\n", *self->usages++);
     } else {
-        fprintf(stdout, "Usage:\n");
+        ARGPARSE_FPRINTF_S(stdout, "Usage:\n");
     }
 
     // print description
     if (self->description)
-        fprintf(stdout, "%s\n", self->description);
+        ARGPARSE_FPRINTF(stdout, "%s\n", self->description);
 
-    fputc('\n', stdout);
+    ARGPARSE_FPRINTF_S(stdout, "\n");
 
     const struct argparse_option *options;
 
@@ -339,40 +369,40 @@ argparse_usage(struct argparse *self)
         size_t pos = 0;
         int pad    = 0;
         if (options->type == ARGPARSE_OPT_GROUP) {
-            fputc('\n', stdout);
-            fprintf(stdout, "%s", options->help);
-            fputc('\n', stdout);
+            ARGPARSE_FPRINTF_S(stdout, "\n");
+            ARGPARSE_FPRINTF(stdout, "%s", options->help);
+            ARGPARSE_FPRINTF_S(stdout, "\n");
             continue;
         }
-        pos = fprintf(stdout, "    ");
+        pos = ARGPARSE_FPRINTF_S(stdout, "    ");
         if (options->short_name) {
-            pos += fprintf(stdout, "-%c", options->short_name);
+            pos += ARGPARSE_FPRINTF(stdout, "-%c", options->short_name);
         }
         if (options->long_name && options->short_name) {
-            pos += fprintf(stdout, ", ");
+            pos += ARGPARSE_FPRINTF_S(stdout, ", ");
         }
         if (options->long_name) {
-            pos += fprintf(stdout, "--%s", options->long_name);
+            pos += ARGPARSE_FPRINTF(stdout, "--%s", options->long_name);
         }
         if (options->type == ARGPARSE_OPT_INTEGER) {
-            pos += fprintf(stdout, "=<int>");
+            pos += ARGPARSE_FPRINTF_S(stdout, "=<int>");
         } else if (options->type == ARGPARSE_OPT_FLOAT) {
-            pos += fprintf(stdout, "=<flt>");
+            pos += ARGPARSE_FPRINTF_S(stdout, "=<flt>");
         } else if (options->type == ARGPARSE_OPT_STRING) {
-            pos += fprintf(stdout, "=<str>");
+            pos += ARGPARSE_FPRINTF_S(stdout, "=<str>");
         }
         if (pos <= usage_opts_width) {
             pad = usage_opts_width - pos;
         } else {
-            fputc('\n', stdout);
+            ARGPARSE_FPRINTF_S(stdout, "\n");
             pad = usage_opts_width;
         }
-        fprintf(stdout, "%*s%s\n", pad + 2, "", options->help);
+        ARGPARSE_FPRINTF(stdout, "%*s%s\n", pad + 2, "", options->help);
     }
 
     // print epilog
     if (self->epilog)
-        fprintf(stdout, "%s\n", self->epilog);
+        ARGPARSE_FPRINTF(stdout, "%s\n", self->epilog);
 }
 
 int
@@ -380,5 +410,5 @@ argparse_help_cb(struct argparse *self, const struct argparse_option *option)
 {
     (void)option;
     argparse_usage(self);
-    exit(0);
+    return 0;
 }
